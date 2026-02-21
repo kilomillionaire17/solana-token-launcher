@@ -213,7 +213,10 @@ export default function CreateToken() {
       const totalFee = calculateFees();
       const lamports = Math.round(totalFee * LAMPORTS_PER_SOL);
 
-      toast.info(`Sending ${totalFee} SOL service fee...`, { duration: 5000 });
+      toast.info(
+        `🔐 Confirm transaction in your Phantom wallet...\nSending ${totalFee} SOL service fee`,
+        { duration: 8000 }
+      );
 
       // Use Phantom's sendTransaction via window.solana
       const { Connection, PublicKey, Transaction, SystemProgram } = await import('@solana/web3.js');
@@ -235,13 +238,17 @@ export default function CreateToken() {
       feeTransaction.feePayer = fromPubkey;
 
       const phantom = (window as unknown as { solana: { signAndSendTransaction: (tx: unknown) => Promise<{ signature: string }> } }).solana;
+      
+      // Show wallet confirmation prompt
+      toast.info('📱 Waiting for wallet confirmation...', { duration: 10000 });
+      
       const { signature: feeTxSig } = await phantom.signAndSendTransaction(feeTransaction);
 
-      toast.success('Fee payment confirmed! Creating token...', { duration: 5000 });
+      toast.success('✅ Fee payment confirmed! Creating token...', { duration: 5000 });
       console.log('Fee transaction:', feeTxSig);
 
       // Step 2: Create the token on-chain
-      toast.info('Minting token on Solana mainnet...', { duration: 5000 });
+      toast.info('🔄 Minting token on Solana mainnet...\nConfirm in your wallet', { duration: 8000 });
 
       const tokenConfig: TokenConfig = {
         name: form.name,
@@ -258,13 +265,14 @@ export default function CreateToken() {
         tokenConfig,
         publicKey!,
         async (tx: any) => {
+          toast.info('📱 Confirm token creation in your wallet...', { duration: 10000 });
           const { signature } = await phantom.signAndSendTransaction(tx);
           return { signature };
         }
       );
 
       if (!result.success) {
-        toast.error(`Token creation failed: ${result.error}`);
+        toast.error(`❌ Token creation failed: ${result.error}`);
         setLaunching(false);
         return;
       }
@@ -276,14 +284,20 @@ export default function CreateToken() {
       setTokenAccountAddress(result.tokenAccountAddress);
       setTxSignature(result.transactionSignatures[result.transactionSignatures.length - 1]);
 
-      toast.success('Token launched successfully! 🚀', { duration: 8000 });
+      toast.success('🚀 Token launched successfully! Your token is now live on Solana!', { duration: 8000 });
 
     } catch (err: unknown) {
       const error = err as { message?: string };
-      if (error?.message?.includes('User rejected')) {
-        toast.error('Transaction cancelled by user');
+      const errorMsg = error?.message || '';
+      
+      if (errorMsg.includes('User rejected')) {
+        toast.error('❌ Transaction rejected in wallet. Please try again.');
+      } else if (errorMsg.includes('Insufficient funds')) {
+        toast.error('❌ Insufficient SOL balance. Please add more SOL to your wallet.');
+      } else if (errorMsg.includes('Network')) {
+        toast.error('❌ Network error. Please check your connection and try again.');
       } else {
-        toast.error('Transaction failed. Please try again.');
+        toast.error('❌ Transaction failed. Please try again.');
         console.error(err);
       }
     } finally {
@@ -746,22 +760,27 @@ export default function CreateToken() {
                 className="w-full flex items-center justify-center gap-2 py-4 rounded-xl btn-gradient text-white font-extrabold text-base disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {launching ? (
-                  <>
-                    <Loader2 size={18} className="animate-spin" />
-                    Launching Token...
-                  </>
-                ) : (
-                  <>
-                    🚀 Launch Token
-                  </>
-                )}
+              <>
+                <Loader2 size={18} className="animate-spin" />
+                <div className="flex flex-col items-center gap-1">
+                  <span>Launching Token...</span>
+                  <span className="text-xs opacity-75">(Check your Phantom wallet)</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <Zap size={18} />
+                Launch Token
+              </>
+            )}
               </button>
             ) : (
               <button
                 onClick={connect}
-                className="w-full flex items-center justify-center gap-2 py-4 rounded-xl btn-gradient text-white font-extrabold text-base"
+                className="w-full flex items-center justify-center gap-2 py-4 rounded-xl btn-gradient text-white font-extrabold text-base hover:shadow-lg hover:shadow-[#9945FF]/50 transition-all"
               >
-                Connect Wallet to Launch
+                <span>🔐</span>
+                Connect Phantom Wallet to Launch
               </button>
             )}
 

@@ -197,6 +197,7 @@ export default function CreateToken() {
 
   const handleLaunch = async () => {
     if (!connected) {
+      toast.info('Please connect your Phantom wallet first', { duration: 3000 });
       await connect();
       return;
     }
@@ -242,10 +243,27 @@ export default function CreateToken() {
       // Show wallet confirmation prompt
       toast.info('📱 Waiting for wallet confirmation...', { duration: 10000 });
       
-      const { signature: feeTxSig } = await phantom.signAndSendTransaction(feeTransaction);
+      let feeTxSig: string;
+      try {
+        const result = await phantom.signAndSendTransaction(feeTransaction);
+        feeTxSig = result.signature;
+      } catch (walletErr: any) {
+        if (walletErr?.message?.includes('User rejected')) {
+          throw new Error('User rejected the fee transaction');
+        }
+        throw walletErr;
+      }
 
       toast.success('✅ Fee payment confirmed! Creating token...', { duration: 5000 });
       console.log('Fee transaction:', feeTxSig);
+      
+      // Verify fee transaction was actually confirmed
+      try {
+        await connection.confirmTransaction(feeTxSig, 'confirmed');
+        console.log('Fee transaction confirmed on-chain');
+      } catch (confirmErr) {
+        console.warn('Fee transaction confirmation timeout, but proceeding...', confirmErr);
+      }
 
       // Step 2: Create the token on-chain
       toast.info('🔄 Minting token on Solana mainnet...\nConfirm in your wallet', { duration: 8000 });
@@ -266,15 +284,28 @@ export default function CreateToken() {
         publicKey!,
         async (tx: any) => {
           toast.info('📱 Confirm token creation in your wallet...', { duration: 10000 });
-          const { signature } = await phantom.signAndSendTransaction(tx);
-          return { signature };
+          try {
+            const { signature } = await phantom.signAndSendTransaction(tx);
+            return { signature };
+          } catch (walletErr: any) {
+            if (walletErr?.message?.includes('User rejected')) {
+              throw new Error('User rejected the token creation transaction');
+            }
+            throw walletErr;
+          }
         }
       );
 
       if (!result.success) {
+        console.error('Token creation failed:', result.error);
         toast.error(`❌ Token creation failed: ${result.error}`);
         setLaunching(false);
         return;
+      }
+
+      // Verify we have valid transaction signatures
+      if (!result.transactionSignatures || result.transactionSignatures.length === 0) {
+        throw new Error('No transaction signatures returned from token creation');
       }
 
       // Store all transaction signatures
@@ -284,21 +315,32 @@ export default function CreateToken() {
       setTokenAccountAddress(result.tokenAccountAddress);
       setTxSignature(result.transactionSignatures[result.transactionSignatures.length - 1]);
 
+      // Log all transaction signatures for verification
+      console.log('All transaction signatures:', allSigs);
+      console.log('Mint address:', result.mintAddress);
+      console.log('Token account:', result.tokenAccountAddress);
+
       toast.success('🚀 Token launched successfully! Your token is now live on Solana!', { duration: 8000 });
 
     } catch (err: unknown) {
       const error = err as { message?: string };
       const errorMsg = error?.message || '';
       
+      console.error('Launch error:', errorMsg, err);
+      
       if (errorMsg.includes('User rejected')) {
         toast.error('❌ Transaction rejected in wallet. Please try again.');
       } else if (errorMsg.includes('Insufficient funds')) {
         toast.error('❌ Insufficient SOL balance. Please add more SOL to your wallet.');
-      } else if (errorMsg.includes('Network')) {
+      } else if (errorMsg.includes('Network') || errorMsg.includes('fetch')) {
         toast.error('❌ Network error. Please check your connection and try again.');
+      } else if (errorMsg.includes('Blockhash not found')) {
+        toast.error('❌ Transaction expired. Please try again.');
+      } else if (errorMsg.includes('Invalid')) {
+        toast.error('❌ Invalid transaction data. Please check your inputs and try again.');
       } else {
-        toast.error('❌ Transaction failed. Please try again.');
-        console.error(err);
+        toast.error(`❌ Transaction failed: ${errorMsg || 'Unknown error'}. Please try again.`);
+        console.error('Full error:', err);
       }
     } finally {
       setLaunching(false);

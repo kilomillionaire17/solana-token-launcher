@@ -15,10 +15,19 @@ import Footer from '@/components/Footer';
 import { useWallet } from '@/contexts/WalletContext';
 import { createSolanaToken, TokenConfig } from '@/lib/tokenMinter';
 
+
+
 // Fee configuration
 const SERVICE_FEE_SOL = 0.05;
 const FEE_RECIPIENT = 'EBbuHfn9zQ1N3FYvcdKJ5zrdD8wdJc2kY8CZzciZE5KD';
 const LAMPORTS_PER_SOL = 1_000_000_000;
+
+// RPC endpoints with fallbacks
+const RPC_ENDPOINTS = [
+  'https://api.mainnet-beta.solana.com',
+  'https://solana-api.projectserum.com',
+  'https://rpc.ankr.com/solana',
+];
 
 interface TokenForm {
   name: string;
@@ -215,16 +224,54 @@ export default function CreateToken() {
       const lamports = Math.round(totalFee * LAMPORTS_PER_SOL);
 
       toast.info(
-        `🔐 Confirm transaction in your Phantom wallet...\nSending ${totalFee} SOL service fee`,
-        { duration: 8000 }
+        `🔐 Getting ready to confirm in your Phantom wallet...`,
+        { duration: 5000 }
       );
 
       // Use Phantom's sendTransaction via window.solana
-      const { Connection, PublicKey, Transaction, SystemProgram } = await import('@solana/web3.js');
+      const { PublicKey, Transaction, SystemProgram } = await import('@solana/web3.js');
       
-      const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+      // Get a working RPC connection with fallbacks
+      toast.info('🔗 Connecting to Solana network...', { duration: 3000 });
+      
+      // Import and get working connection
+      const { Connection } = await import('@solana/web3.js');
+      let connection: any;
+      for (const endpoint of RPC_ENDPOINTS) {
+        try {
+          connection = new Connection(endpoint, 'confirmed');
+          await connection.getLatestBlockhash();
+          console.log(`✅ Using RPC endpoint: ${endpoint}`);
+          break;
+        } catch (err) {
+          console.warn(`❌ RPC endpoint failed: ${endpoint}`, err);
+          continue;
+        }
+      }
+      
+      if (!connection) {
+        throw new Error('All RPC endpoints failed. Please check your internet connection.');
+      }
       const fromPubkey = new PublicKey(publicKey!);
       const toPubkey = new PublicKey(FEE_RECIPIENT);
+
+      // Get blockhash with retry logic
+      let blockhash: string;
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          const { blockhash: bh } = await connection.getLatestBlockhash();
+          blockhash = bh;
+          break;
+        } catch (err) {
+          retries--;
+          if (retries === 0) {
+            throw new Error('Failed to get blockhash after 3 attempts. Please check your internet connection.');
+          }
+          console.warn(`Blockhash attempt failed, retrying... (${retries} left)`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
 
       const feeTransaction = new Transaction().add(
         SystemProgram.transfer({
@@ -234,20 +281,22 @@ export default function CreateToken() {
         })
       );
 
-      const { blockhash } = await connection.getLatestBlockhash();
       feeTransaction.recentBlockhash = blockhash;
       feeTransaction.feePayer = fromPubkey;
 
       const phantom = (window as unknown as { solana: { signAndSendTransaction: (tx: unknown) => Promise<{ signature: string }> } }).solana;
       
       // Show wallet confirmation prompt
-      toast.info('📱 Waiting for wallet confirmation...', { duration: 10000 });
+      toast.info(`📱 Confirm transaction in your Phantom wallet...\nSending ${totalFee} SOL service fee`, { duration: 10000 });
       
       let feeTxSig: string;
       try {
+        console.log('Sending transaction to Phantom wallet...');
         const result = await phantom.signAndSendTransaction(feeTransaction);
         feeTxSig = result.signature;
+        console.log('Transaction signed and sent:', feeTxSig);
       } catch (walletErr: any) {
+        console.error('Wallet error:', walletErr);
         if (walletErr?.message?.includes('User rejected')) {
           throw new Error('User rejected the fee transaction');
         }
@@ -283,11 +332,14 @@ export default function CreateToken() {
         tokenConfig,
         publicKey!,
         async (tx: any) => {
-          toast.info('📱 Confirm token creation in your wallet...', { duration: 10000 });
+          toast.info('📱 Confirm token creation in your Phantom wallet...', { duration: 10000 });
           try {
+            console.log('Sending token creation transaction to Phantom...');
             const { signature } = await phantom.signAndSendTransaction(tx);
+            console.log('Token creation transaction signed:', signature);
             return { signature };
           } catch (walletErr: any) {
+            console.error('Wallet error during token creation:', walletErr);
             if (walletErr?.message?.includes('User rejected')) {
               throw new Error('User rejected the token creation transaction');
             }
@@ -332,12 +384,14 @@ export default function CreateToken() {
         toast.error('❌ Transaction rejected in wallet. Please try again.');
       } else if (errorMsg.includes('Insufficient funds')) {
         toast.error('❌ Insufficient SOL balance. Please add more SOL to your wallet.');
-      } else if (errorMsg.includes('Network') || errorMsg.includes('fetch')) {
-        toast.error('❌ Network error. Please check your connection and try again.');
-      } else if (errorMsg.includes('Blockhash not found')) {
-        toast.error('❌ Transaction expired. Please try again.');
+      } else if (errorMsg.includes('Network') || errorMsg.includes('fetch') || errorMsg.includes('403')) {
+        toast.error('❌ Network error. Please check your internet connection and try again.');
+      } else if (errorMsg.includes('Blockhash') || errorMsg.includes('blockhash')) {
+        toast.error('❌ Failed to connect to Solana network. Please try again in a moment.');
       } else if (errorMsg.includes('Invalid')) {
         toast.error('❌ Invalid transaction data. Please check your inputs and try again.');
+      } else if (errorMsg.includes('All RPC endpoints failed')) {
+        toast.error('❌ Unable to connect to Solana network. Please check your internet connection.');
       } else {
         toast.error(`❌ Transaction failed: ${errorMsg || 'Unknown error'}. Please try again.`);
         console.error('Full error:', err);

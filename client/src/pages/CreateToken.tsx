@@ -22,12 +22,42 @@ const SERVICE_FEE_SOL = 0.05;
 const FEE_RECIPIENT = 'EBbuHfn9zQ1N3FYvcdKJ5zrdD8wdJc2kY8CZzciZE5KD';
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
-// RPC endpoints with fallbacks
+// RPC endpoints with fallbacks - ordered by reliability
 const RPC_ENDPOINTS = [
-  'https://api.mainnet-beta.solana.com',
+  'https://rpc.ankr.com/solana',  // Ankr is most reliable
   'https://solana-api.projectserum.com',
-  'https://rpc.ankr.com/solana',
+  'https://api.mainnet-beta.solana.com',
 ];
+
+// Enhanced RPC connection with aggressive retry and timeout handling
+const getRPCConnection = async () => {
+  const { Connection } = await import('@solana/web3.js');
+  let lastConnection: any = null;
+  
+  for (const endpoint of RPC_ENDPOINTS) {
+    try {
+      const connection = new Connection(endpoint, 'confirmed');
+      lastConnection = connection;
+      
+      // Test connection with a short timeout
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout')), 5000)
+      );
+      
+      const testPromise = connection.getLatestBlockhash();
+      await Promise.race([testPromise, timeoutPromise]);
+      
+      console.log(`✅ Connected to RPC: ${endpoint}`);
+      return connection;
+    } catch (err) {
+      console.warn(`❌ RPC failed (${endpoint}):`, err);
+    }
+  }
+  
+  // If all fail, return the last attempted connection
+  console.warn('⚠️ All RPC endpoints failed, using default with wallet fallback');
+  return lastConnection || new Connection(RPC_ENDPOINTS[0], 'confirmed');
+};
 
 interface TokenForm {
   name: string;
@@ -234,43 +264,41 @@ export default function CreateToken() {
       // Get a working RPC connection with fallbacks
       toast.info('🔗 Connecting to Solana network...', { duration: 3000 });
       
-      // Import and get working connection
-      const { Connection } = await import('@solana/web3.js');
-      let connection: any;
-      for (const endpoint of RPC_ENDPOINTS) {
-        try {
-          connection = new Connection(endpoint, 'confirmed');
-          await connection.getLatestBlockhash();
-          console.log(`✅ Using RPC endpoint: ${endpoint}`);
-          break;
-        } catch (err) {
-          console.warn(`❌ RPC endpoint failed: ${endpoint}`, err);
-          continue;
-        }
-      }
-      
-      if (!connection) {
-        throw new Error('All RPC endpoints failed. Please check your internet connection.');
-      }
+      const connection = await getRPCConnection();
       const fromPubkey = new PublicKey(publicKey!);
       const toPubkey = new PublicKey(FEE_RECIPIENT);
 
-      // Get blockhash with retry logic
-      let blockhash: string;
-      let retries = 3;
+      // Get blockhash with aggressive retry logic
+      let blockhash: string | null = null;
+      let retries = 5;
+      
       while (retries > 0) {
         try {
-          const { blockhash: bh } = await connection.getLatestBlockhash();
-          blockhash = bh;
+          const timeoutPromise = new Promise<never>((_, reject) => 
+            setTimeout(() => reject(new Error('Blockhash request timeout')), 3000)
+          );
+          
+          const blockHashPromise = connection.getLatestBlockhash();
+          const result = await Promise.race([blockHashPromise, timeoutPromise]);
+          blockhash = result.blockhash;
+          console.log('✅ Got blockhash:', blockhash);
           break;
         } catch (err) {
           retries--;
-          if (retries === 0) {
-            throw new Error('Failed to get blockhash after 3 attempts. Please check your internet connection.');
+          console.warn(`Blockhash attempt failed (${retries} retries left):`, err);
+          
+          if (retries > 0) {
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, 500));
           }
-          console.warn(`Blockhash attempt failed, retrying... (${retries} left)`);
-          await new Promise(resolve => setTimeout(resolve, 1000));
         }
+      }
+      
+      // If we still don't have a blockhash, try to proceed anyway
+      // Phantom wallet can handle getting its own blockhash
+      if (!blockhash) {
+        console.warn('⚠️ Could not get blockhash from RPC, will let Phantom wallet handle it');
+        toast.info('📱 Preparing wallet transaction...', { duration: 3000 });
       }
 
       const feeTransaction = new Transaction().add(
@@ -281,24 +309,37 @@ export default function CreateToken() {
         })
       );
 
-      feeTransaction.recentBlockhash = blockhash;
+      // Only set blockhash if we have it
+      if (blockhash) {
+        feeTransaction.recentBlockhash = blockhash;
+      }
       feeTransaction.feePayer = fromPubkey;
 
       const phantom = (window as unknown as { solana: { signAndSendTransaction: (tx: unknown) => Promise<{ signature: string }> } }).solana;
       
-      // Show wallet confirmation prompt
-      toast.info(`📱 Confirm transaction in your Phantom wallet...\nSending ${totalFee} SOL service fee`, { duration: 10000 });
+      // Show wallet confirmation prompt - this is critical
+      toast.info(`📱 Confirm transaction in your Phantom wallet...\nSending ${totalFee} SOL service fee`, { duration: 15000 });
       
       let feeTxSig: string;
       try {
-        console.log('Sending transaction to Phantom wallet...');
+        console.log('🔐 Sending transaction to Phantom wallet...');
+        console.log('Transaction details:', {
+          from: fromPubkey.toString(),
+          to: toPubkey.toString(),
+          amount: lamports,
+          hasBlockhash: !!blockhash,
+        });
+        
         const result = await phantom.signAndSendTransaction(feeTransaction);
         feeTxSig = result.signature;
-        console.log('Transaction signed and sent:', feeTxSig);
+        console.log('✅ Transaction signed and sent:', feeTxSig);
       } catch (walletErr: any) {
-        console.error('Wallet error:', walletErr);
+        console.error('❌ Wallet error:', walletErr);
         if (walletErr?.message?.includes('User rejected')) {
           throw new Error('User rejected the fee transaction');
+        }
+        if (walletErr?.message?.includes('Phantom')) {
+          throw new Error('Phantom wallet error. Make sure Phantom is installed and connected.');
         }
         throw walletErr;
       }
@@ -378,12 +419,14 @@ export default function CreateToken() {
       const error = err as { message?: string };
       const errorMsg = error?.message || '';
       
-      console.error('Launch error:', errorMsg, err);
+      console.error('❌ Launch error:', errorMsg, err);
       
       if (errorMsg.includes('User rejected')) {
         toast.error('❌ Transaction rejected in wallet. Please try again.');
       } else if (errorMsg.includes('Insufficient funds')) {
         toast.error('❌ Insufficient SOL balance. Please add more SOL to your wallet.');
+      } else if (errorMsg.includes('Phantom')) {
+        toast.error('❌ Phantom wallet error. Please make sure Phantom is installed and connected.');
       } else if (errorMsg.includes('Network') || errorMsg.includes('fetch') || errorMsg.includes('403')) {
         toast.error('❌ Network error. Please check your internet connection and try again.');
       } else if (errorMsg.includes('Blockhash') || errorMsg.includes('blockhash')) {
@@ -394,7 +437,7 @@ export default function CreateToken() {
         toast.error('❌ Unable to connect to Solana network. Please check your internet connection.');
       } else {
         toast.error(`❌ Transaction failed: ${errorMsg || 'Unknown error'}. Please try again.`);
-        console.error('Full error:', err);
+        console.error('Full error details:', err);
       }
     } finally {
       setLaunching(false);

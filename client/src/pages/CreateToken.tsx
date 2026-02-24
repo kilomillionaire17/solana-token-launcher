@@ -249,58 +249,24 @@ export default function CreateToken() {
 
     setLaunching(true);
     try {
-      // Step 1: Send service fee to the fee recipient wallet
+      // Get Phantom wallet reference IMMEDIATELY
+      const phantom = (window as unknown as { solana?: { signAndSendTransaction?: (tx: unknown) => Promise<{ signature: string }> } }).solana;
+      
+      if (!phantom || !phantom.signAndSendTransaction) {
+        throw new Error('Phantom wallet not found. Please install Phantom extension.');
+      }
+
       const totalFee = calculateFees();
       const lamports = Math.round(totalFee * LAMPORTS_PER_SOL);
 
-      toast.info(
-        `🔐 Getting ready to confirm in your Phantom wallet...`,
-        { duration: 5000 }
-      );
-
-      // Use Phantom's sendTransaction via window.solana
-      const { PublicKey, Transaction, SystemProgram } = await import('@solana/web3.js');
+      // Import Solana web3 QUICKLY
+      const { PublicKey, Transaction, SystemProgram, Connection } = await import('@solana/web3.js');
       
-      // Get a working RPC connection with fallbacks
-      toast.info('🔗 Connecting to Solana network...', { duration: 3000 });
-      
-      const connection = await getRPCConnection();
       const fromPubkey = new PublicKey(publicKey!);
       const toPubkey = new PublicKey(FEE_RECIPIENT);
 
-      // Get blockhash with aggressive retry logic
-      let blockhash: string | null = null;
-      let retries = 5;
-      
-      while (retries > 0) {
-        try {
-          const timeoutPromise = new Promise<never>((_, reject) => 
-            setTimeout(() => reject(new Error('Blockhash request timeout')), 3000)
-          );
-          
-          const blockHashPromise = connection.getLatestBlockhash();
-          const result = await Promise.race([blockHashPromise, timeoutPromise]);
-          blockhash = result.blockhash;
-          console.log('✅ Got blockhash:', blockhash);
-          break;
-        } catch (err) {
-          retries--;
-          console.warn(`Blockhash attempt failed (${retries} retries left):`, err);
-          
-          if (retries > 0) {
-            // Wait before retrying
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-        }
-      }
-      
-      // If we still don't have a blockhash, try to proceed anyway
-      // Phantom wallet can handle getting its own blockhash
-      if (!blockhash) {
-        console.warn('⚠️ Could not get blockhash from RPC, will let Phantom wallet handle it');
-        toast.info('📱 Preparing wallet transaction...', { duration: 3000 });
-      }
-
+      // Create transaction WITHOUT waiting for blockhash
+      // Phantom will handle getting the blockhash
       const feeTransaction = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey,
@@ -309,27 +275,27 @@ export default function CreateToken() {
         })
       );
 
-      // Only set blockhash if we have it
-      if (blockhash) {
+      // Try to get blockhash quickly, but don't wait too long
+      try {
+        const connection = new Connection('https://rpc.ankr.com/solana', 'confirmed');
+        const { blockhash } = await Promise.race([
+          connection.getLatestBlockhash(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+        ]);
         feeTransaction.recentBlockhash = blockhash;
+        feeTransaction.feePayer = fromPubkey;
+      } catch (err) {
+        // If we can't get blockhash, Phantom will handle it
+        console.warn('⚠️ Could not get blockhash, Phantom will handle it:', err);
+        feeTransaction.feePayer = fromPubkey;
       }
-      feeTransaction.feePayer = fromPubkey;
 
-      const phantom = (window as unknown as { solana: { signAndSendTransaction: (tx: unknown) => Promise<{ signature: string }> } }).solana;
-      
-      // Show wallet confirmation prompt - this is critical
-      toast.info(`📱 Confirm transaction in your Phantom wallet...\nSending ${totalFee} SOL service fee`, { duration: 15000 });
+      // IMMEDIATELY show the wallet popup
+      console.log('🔐 Triggering Phantom wallet popup NOW...');
+      toast.info(`📱 Check your Phantom wallet to confirm the transaction...`, { duration: 20000 });
       
       let feeTxSig: string;
       try {
-        console.log('🔐 Sending transaction to Phantom wallet...');
-        console.log('Transaction details:', {
-          from: fromPubkey.toString(),
-          to: toPubkey.toString(),
-          amount: lamports,
-          hasBlockhash: !!blockhash,
-        });
-        
         const result = await phantom.signAndSendTransaction(feeTransaction);
         feeTxSig = result.signature;
         console.log('✅ Transaction signed and sent:', feeTxSig);
@@ -347,9 +313,14 @@ export default function CreateToken() {
       toast.success('✅ Fee payment confirmed! Creating token...', { duration: 5000 });
       console.log('Fee transaction:', feeTxSig);
       
-      // Verify fee transaction was actually confirmed
+      // Verify fee transaction was actually confirmed (with timeout)
       try {
-        await connection.confirmTransaction(feeTxSig, 'confirmed');
+        const { Connection } = await import('@solana/web3.js');
+        const connection = new Connection('https://rpc.ankr.com/solana', 'confirmed');
+        await Promise.race([
+          connection.confirmTransaction(feeTxSig, 'confirmed'),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000))
+        ]);
         console.log('Fee transaction confirmed on-chain');
       } catch (confirmErr) {
         console.warn('Fee transaction confirmation timeout, but proceeding...', confirmErr);

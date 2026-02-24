@@ -248,171 +248,195 @@ export default function CreateToken() {
     }
 
     setLaunching(true);
-    try {
-      // Get Phantom wallet reference IMMEDIATELY
-      const phantom = (window as unknown as { solana?: { signAndSendTransaction?: (tx: unknown) => Promise<{ signature: string }> } }).solana;
-      
-      if (!phantom || !phantom.signAndSendTransaction) {
-        throw new Error('Phantom wallet not found. Please install Phantom extension.');
-      }
-
-      const totalFee = calculateFees();
-      const lamports = Math.round(totalFee * LAMPORTS_PER_SOL);
-
-      // Import Solana web3 QUICKLY
-      const { PublicKey, Transaction, SystemProgram, Connection } = await import('@solana/web3.js');
-      
-      const fromPubkey = new PublicKey(publicKey!);
-      const toPubkey = new PublicKey(FEE_RECIPIENT);
-
-      // Create transaction WITHOUT waiting for blockhash
-      // Phantom will handle getting the blockhash
-      const feeTransaction = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey,
-          toPubkey,
-          lamports,
-        })
-      );
-
-      // Try to get blockhash quickly, but don't wait too long
-      try {
-        const connection = new Connection('https://rpc.ankr.com/solana', 'confirmed');
-        const { blockhash } = await Promise.race([
-          connection.getLatestBlockhash(),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
-        ]);
-        feeTransaction.recentBlockhash = blockhash;
-        feeTransaction.feePayer = fromPubkey;
-      } catch (err) {
-        // If we can't get blockhash, Phantom will handle it
-        console.warn('⚠️ Could not get blockhash, Phantom will handle it:', err);
-        feeTransaction.feePayer = fromPubkey;
-      }
-
-      // IMMEDIATELY show the wallet popup
-      console.log('🔐 Triggering Phantom wallet popup NOW...');
-      toast.info(`📱 Check your Phantom wallet to confirm the transaction...`, { duration: 20000 });
-      
-      let feeTxSig: string;
-      try {
-        const result = await phantom.signAndSendTransaction(feeTransaction);
-        feeTxSig = result.signature;
-        console.log('✅ Transaction signed and sent:', feeTxSig);
-      } catch (walletErr: any) {
-        console.error('❌ Wallet error:', walletErr);
-        if (walletErr?.message?.includes('User rejected')) {
-          throw new Error('User rejected the fee transaction');
-        }
-        if (walletErr?.message?.includes('Phantom')) {
-          throw new Error('Phantom wallet error. Make sure Phantom is installed and connected.');
-        }
-        throw walletErr;
-      }
-
-      toast.success('✅ Fee payment confirmed! Creating token...', { duration: 5000 });
-      console.log('Fee transaction:', feeTxSig);
-      
-      // Verify fee transaction was actually confirmed (with timeout)
-      try {
-        const { Connection } = await import('@solana/web3.js');
-        const connection = new Connection('https://rpc.ankr.com/solana', 'confirmed');
-        await Promise.race([
-          connection.confirmTransaction(feeTxSig, 'confirmed'),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000))
-        ]);
-        console.log('Fee transaction confirmed on-chain');
-      } catch (confirmErr) {
-        console.warn('Fee transaction confirmation timeout, but proceeding...', confirmErr);
-      }
-
-      // Step 2: Create the token on-chain
-      toast.info('🔄 Minting token on Solana mainnet...\nConfirm in your wallet', { duration: 8000 });
-
-      const tokenConfig: TokenConfig = {
-        name: form.name,
-        symbol: form.symbol,
-        decimals: form.decimals,
-        initialSupply: form.supply,
-        recipientAddress: form.recipient,
-        revokeFreeze: form.revokeFreeze,
-        revokeMint: form.revokeMint,
-        revokeUpdate: form.revokeUpdate,
-      };
-
-      const result = await createSolanaToken(
-        tokenConfig,
-        publicKey!,
-        async (tx: any) => {
-          toast.info('📱 Confirm token creation in your Phantom wallet...', { duration: 10000 });
-          try {
-            console.log('Sending token creation transaction to Phantom...');
-            const { signature } = await phantom.signAndSendTransaction(tx);
-            console.log('Token creation transaction signed:', signature);
-            return { signature };
-          } catch (walletErr: any) {
-            console.error('Wallet error during token creation:', walletErr);
-            if (walletErr?.message?.includes('User rejected')) {
-              throw new Error('User rejected the token creation transaction');
-            }
-            throw walletErr;
-          }
-        }
-      );
-
-      if (!result.success) {
-        console.error('Token creation failed:', result.error);
-        toast.error(`❌ Token creation failed: ${result.error}`);
-        setLaunching(false);
-        return;
-      }
-
-      // Verify we have valid transaction signatures
-      if (!result.transactionSignatures || result.transactionSignatures.length === 0) {
-        throw new Error('No transaction signatures returned from token creation');
-      }
-
-      // Store all transaction signatures
-      const allSigs = [feeTxSig, ...result.transactionSignatures];
-      setTransactionSignatures(allSigs);
-      setMintAddress(result.mintAddress);
-      setTokenAccountAddress(result.tokenAccountAddress);
-      setTxSignature(result.transactionSignatures[result.transactionSignatures.length - 1]);
-
-      // Log all transaction signatures for verification
-      console.log('All transaction signatures:', allSigs);
-      console.log('Mint address:', result.mintAddress);
-      console.log('Token account:', result.tokenAccountAddress);
-
-      toast.success('🚀 Token launched successfully! Your token is now live on Solana!', { duration: 8000 });
-
-    } catch (err: unknown) {
-      const error = err as { message?: string };
-      const errorMsg = error?.message || '';
-      
-      console.error('❌ Launch error:', errorMsg, err);
-      
-      if (errorMsg.includes('User rejected')) {
-        toast.error('❌ Transaction rejected in wallet. Please try again.');
-      } else if (errorMsg.includes('Insufficient funds')) {
-        toast.error('❌ Insufficient SOL balance. Please add more SOL to your wallet.');
-      } else if (errorMsg.includes('Phantom')) {
-        toast.error('❌ Phantom wallet error. Please make sure Phantom is installed and connected.');
-      } else if (errorMsg.includes('Network') || errorMsg.includes('fetch') || errorMsg.includes('403')) {
-        toast.error('❌ Network error. Please check your internet connection and try again.');
-      } else if (errorMsg.includes('Blockhash') || errorMsg.includes('blockhash')) {
-        toast.error('❌ Failed to connect to Solana network. Please try again in a moment.');
-      } else if (errorMsg.includes('Invalid')) {
-        toast.error('❌ Invalid transaction data. Please check your inputs and try again.');
-      } else if (errorMsg.includes('All RPC endpoints failed')) {
-        toast.error('❌ Unable to connect to Solana network. Please check your internet connection.');
-      } else {
-        toast.error(`❌ Transaction failed: ${errorMsg || 'Unknown error'}. Please try again.`);
-        console.error('Full error details:', err);
-      }
-    } finally {
+    
+    // DEEP FIX: Get Phantom wallet reference BEFORE any async operations
+    const phantom = (window as any)?.solana;
+    
+    if (!phantom || !phantom.signAndSendTransaction) {
       setLaunching(false);
+      toast.error('❌ Phantom wallet not found. Please install Phantom extension.');
+      return;
     }
+
+    // Immediately trigger the wallet popup with a minimal transaction
+    // This ensures the browser sees it as a direct user action
+    const launchTransactionAsync = async () => {
+      try {
+        const totalFee = calculateFees();
+        const lamports = Math.round(totalFee * LAMPORTS_PER_SOL);
+
+        // Import Solana web3
+        const { PublicKey, Transaction, SystemProgram, Connection } = await import('@solana/web3.js');
+        
+        const fromPubkey = new PublicKey(publicKey!);
+        const toPubkey = new PublicKey(FEE_RECIPIENT);
+
+        // Create a minimal transaction
+        const feeTransaction = new Transaction().add(
+          SystemProgram.transfer({
+            fromPubkey,
+            toPubkey,
+            lamports,
+          })
+        );
+
+        // Set feePayer immediately
+        feeTransaction.feePayer = fromPubkey;
+
+        // Try to get blockhash in background, but don't block the wallet popup
+        let blockhashSet = false;
+        const blockhashPromise = (async () => {
+          try {
+            const connection = new Connection('https://rpc.ankr.com/solana', 'confirmed');
+            const { blockhash } = await Promise.race([
+              connection.getLatestBlockhash(),
+              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))
+            ]);
+            feeTransaction.recentBlockhash = blockhash;
+            blockhashSet = true;
+            console.log('✅ Blockhash set:', blockhash);
+          } catch (err) {
+            console.warn('⚠️ Could not get blockhash in time, Phantom will handle it:', err);
+          }
+        })();
+
+        // Wait a tiny bit for blockhash, but proceed immediately if it fails
+        await Promise.race([
+          blockhashPromise,
+          new Promise(resolve => setTimeout(resolve, 500))
+        ]);
+
+        // NOW trigger the wallet popup
+        console.log('🔐 Triggering Phantom wallet popup NOW...');
+        toast.info(`📱 Check your Phantom wallet to confirm the transaction...`, { duration: 20000 });
+        
+        let feeTxSig: string;
+        try {
+          const result = await phantom.signAndSendTransaction(feeTransaction);
+          feeTxSig = result.signature;
+          console.log('✅ Transaction signed and sent:', feeTxSig);
+        } catch (walletErr: any) {
+          console.error('❌ Wallet error:', walletErr);
+          if (walletErr?.message?.includes('User rejected')) {
+            throw new Error('User rejected the fee transaction');
+          }
+          if (walletErr?.message?.includes('Phantom')) {
+            throw new Error('Phantom wallet error. Make sure Phantom is installed and connected.');
+          }
+          throw walletErr;
+        }
+
+        toast.success('✅ Fee payment confirmed! Creating token...', { duration: 5000 });
+        console.log('Fee transaction:', feeTxSig);
+        
+        // Verify fee transaction was actually confirmed (with timeout)
+        try {
+          const { Connection } = await import('@solana/web3.js');
+          const connection = new Connection('https://rpc.ankr.com/solana', 'confirmed');
+          await Promise.race([
+            connection.confirmTransaction(feeTxSig, 'confirmed'),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000))
+          ]);
+          console.log('Fee transaction confirmed on-chain');
+        } catch (confirmErr) {
+          console.warn('Fee transaction confirmation timeout, but proceeding...', confirmErr);
+        }
+
+        // Step 2: Create the token on-chain
+        toast.info('🔄 Minting token on Solana mainnet...\nConfirm in your wallet', { duration: 8000 });
+
+        const tokenConfig: TokenConfig = {
+          name: form.name,
+          symbol: form.symbol,
+          decimals: form.decimals,
+          initialSupply: form.supply,
+          recipientAddress: form.recipient,
+          revokeFreeze: form.revokeFreeze,
+          revokeMint: form.revokeMint,
+          revokeUpdate: form.revokeUpdate,
+        };
+
+        const result = await createSolanaToken(
+          tokenConfig,
+          publicKey!,
+          async (tx: any) => {
+            toast.info('📱 Confirm token creation in your Phantom wallet...', { duration: 10000 });
+            try {
+              console.log('Sending token creation transaction to Phantom...');
+              const { signature } = await phantom.signAndSendTransaction(tx);
+              console.log('Token creation transaction signed:', signature);
+              return { signature };
+            } catch (walletErr: any) {
+              console.error('Wallet error during token creation:', walletErr);
+              if (walletErr?.message?.includes('User rejected')) {
+                throw new Error('User rejected the token creation transaction');
+              }
+              throw walletErr;
+            }
+          }
+        );
+
+        if (!result.success) {
+          console.error('Token creation failed:', result.error);
+          toast.error(`❌ Token creation failed: ${result.error}`);
+          setLaunching(false);
+          return;
+        }
+
+        // Verify we have valid transaction signatures
+        if (!result.transactionSignatures || result.transactionSignatures.length === 0) {
+          throw new Error('No transaction signatures returned from token creation');
+        }
+
+        // Store all transaction signatures
+        const allSigs = [feeTxSig, ...result.transactionSignatures];
+        setTransactionSignatures(allSigs);
+        setMintAddress(result.mintAddress);
+        setTokenAccountAddress(result.tokenAccountAddress);
+        setTxSignature(result.transactionSignatures[result.transactionSignatures.length - 1]);
+
+        // Log all transaction signatures for verification
+        console.log('All transaction signatures:', allSigs);
+        console.log('Mint address:', result.mintAddress);
+        console.log('Token account:', result.tokenAccountAddress);
+
+        toast.success('🚀 Token launched successfully! Your token is now live on Solana!', { duration: 8000 });
+
+      } catch (err: unknown) {
+        const error = err as { message?: string };
+        const errorMsg = error?.message || '';
+        
+        console.error('❌ Launch error:', errorMsg, err);
+        
+        if (errorMsg.includes('User rejected')) {
+          toast.error('❌ Transaction rejected in wallet. Please try again.');
+        } else if (errorMsg.includes('Insufficient funds')) {
+          toast.error('❌ Insufficient SOL balance. Please add more SOL to your wallet.');
+        } else if (errorMsg.includes('Phantom')) {
+          toast.error('❌ Phantom wallet error. Please make sure Phantom is installed and connected.');
+        } else if (errorMsg.includes('Network') || errorMsg.includes('fetch') || errorMsg.includes('403')) {
+          toast.error('❌ Network error. Please check your internet connection and try again.');
+        } else if (errorMsg.includes('Blockhash') || errorMsg.includes('blockhash')) {
+          toast.error('❌ Failed to connect to Solana network. Please try again in a moment.');
+        } else if (errorMsg.includes('Invalid')) {
+          toast.error('❌ Invalid transaction data. Please check your inputs and try again.');
+        } else if (errorMsg.includes('All RPC endpoints failed')) {
+          toast.error('❌ Unable to connect to Solana network. Please check your internet connection.');
+        } else {
+          toast.error(`❌ Transaction failed: ${errorMsg || 'Unknown error'}. Please try again.`);
+          console.error('Full error details:', err);
+        }
+      } finally {
+        setLaunching(false);
+      }
+    };
+
+    // Call the async function without awaiting it in the main thread
+    // This ensures the browser sees the wallet popup as a direct user action
+    launchTransactionAsync().catch((err) => {
+      console.error('Unhandled error in launchTransactionAsync:', err);
+      setLaunching(false);
+    })
   };
 
   const totalFees = calculateFees();
